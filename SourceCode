@@ -2,7 +2,7 @@
 #AutoIt3Wrapper_UseX64=n
 #AutoIt3Wrapper_UseUpx=n
 #AutoIt3Wrapper_Res_Description=YunuAudio
-#AutoIt3Wrapper_Res_Fileversion=1.3.1.0
+#AutoIt3Wrapper_Res_Fileversion=1.4.1.0
 #NoTrayIcon
 #RequireAdmin
 
@@ -14,6 +14,12 @@ Opt("MustDeclareVars", 1)
 #include <EditConstants.au3>
 #include <StaticConstants.au3>
 #include <Misc.au3>
+#include <WinAPI.au3>
+#include <WinAPIReg.au3>
+#include <WinAPIMem.au3>
+#include <APIRegConstants.au3>
+#include <Security.au3>
+#include <SecurityConstants.au3>
 
 ; Pastikan hanya satu instance berjalan
 If _Singleton("YunuAudio_SingleInstance_7F3A", 1) = 0 Then
@@ -39,9 +45,10 @@ Global $CAPTURE = ""
 Global $APK = ""
 Global $SVV = ""
 Global $VBCABLE_SETUP = ""
+Global $PNPUTIL = ""
 Global $BACKUP_PROFILE = @TempDir & "\YunuAudio_Backup.spr"
-Global $bAudioSwitched = False       ; True = default audio Windows pernah diubah
-Global $bDriverJustInstalled = False ; True = installer VB-Cable dijalankan pada sesi ini
+Global $bAudioSwitched = False
+Global $bDriverJustInstalled = False
 
 ; Status koneksi
 Global $IsConnected = False
@@ -77,11 +84,12 @@ Global $sLastLevelTxt = ""
 Global $hGUI = 0
 Global $boxStatus = 0
 Global $lblStatusText = 0
-Global $lblProgress = 0
-Global $prgBar = 0
 Global $btnConnect = 0
 Global $chkAuto = 0
 Global $lblLevel = 0
+Global $lblProgress = 0
+Global $prgBg = 0
+Global $prgFill = 0
 Global $txtLog = 0
 Global $nMsg = 0
 
@@ -101,57 +109,61 @@ $CAPTURE = LocateFile("YunuCapture.exe")
 $APK = LocateFile("YunuAudio.apk")
 $SVV = LocateFile("SoundVolumeView.exe")
 $VBCABLE_SETUP = LocateFile("VBCABLE_Setup_x64.exe")
+$PNPUTIL = GetPnpUtilPath()
 
 OnAutoItExitRegister("FastExit")
 
 ; ==============================================================================
-; TAMPILAN GUI
+; TAMPILAN GUI (bar loading berada tepat di atas kotak output/log)
 ; ==============================================================================
-$hGUI = GUICreate("YunuAudio", 360, 385, -1, -1)
+$hGUI = GUICreate("YunuAudio", 360, 392, -1, -1)
 GUISetBkColor(0x141414)
 
 $boxStatus = GUICtrlCreateLabel("", 20, 15, 320, 52, $SS_CENTER)
 GUICtrlSetBkColor($boxStatus, 0xEF6C00)
 
-$lblStatusText = GUICtrlCreateLabel("MENYIAPKAN...", 30, 29, 300, 24, $SS_CENTER)
+$lblStatusText = GUICtrlCreateLabel("MENYIAPKAN OUTPUT...", 30, 29, 300, 24, $SS_CENTER)
 GUICtrlSetFont($lblStatusText, 11, 800, 0, "Segoe UI")
 GUICtrlSetColor($lblStatusText, 0xFFFFFF)
 GUICtrlSetBkColor($lblStatusText, $GUI_BKCOLOR_TRANSPARENT)
 
-; Bar loading & status tepat di atas tombol dan kotak output log
-$lblProgress = GUICtrlCreateLabel("Menyiapkan sistem audio...", 20, 73, 320, 15, $SS_CENTER)
-GUICtrlSetFont($lblProgress, 8.5, 400, 0, "Segoe UI")
-GUICtrlSetColor($lblProgress, 0xFFCC80)
-GUICtrlSetBkColor($lblProgress, $GUI_BKCOLOR_TRANSPARENT)
-
-$prgBar = GUICtrlCreateProgress(20, 91, 320, 12)
-GUICtrlSetData($prgBar, 5)
-
-$btnConnect = GUICtrlCreateButton("MOHON TUNGGU...", 20, 110, 320, 42)
+$btnConnect = GUICtrlCreateButton("MOHON TUNGGU...", 20, 76, 320, 42)
 GUICtrlSetFont($btnConnect, 11, 700, 0, "Segoe UI")
 GUICtrlSetState($btnConnect, $GUI_DISABLE)
 
-$chkAuto = GUICtrlCreateCheckbox(" Otomatis sambungkan saat kabel USB dicolok", 25, 159, 310, 18)
+$chkAuto = GUICtrlCreateCheckbox(" Otomatis sambungkan saat kabel USB dicolok", 25, 125, 310, 18)
 GUICtrlSetColor($chkAuto, 0xCCCCCC)
 GUICtrlSetBkColor($chkAuto, 0x141414)
 GUICtrlSetState($chkAuto, $GUI_CHECKED)
 
-$lblLevel = GUICtrlCreateLabel("", 20, 182, 320, 16, $SS_CENTER)
+$lblLevel = GUICtrlCreateLabel("", 20, 149, 320, 16, $SS_CENTER)
 GUICtrlSetFont($lblLevel, 8.5, 400, 0, "Segoe UI")
 GUICtrlSetColor($lblLevel, 0xB0B0B0)
 GUICtrlSetBkColor($lblLevel, $GUI_BKCOLOR_TRANSPARENT)
 
-$txtLog = GUICtrlCreateEdit("", 20, 203, 320, 162, BitOR($ES_AUTOVSCROLL, $ES_READONLY, $WS_VSCROLL))
+; Bar loading tepat di atas kotak output/log
+$lblProgress = GUICtrlCreateLabel("Memulai YunuAudio...", 20, 171, 320, 15, $SS_CENTER)
+GUICtrlSetFont($lblProgress, 8.5, 400, 0, "Segoe UI")
+GUICtrlSetColor($lblProgress, 0xFFCC80)
+GUICtrlSetBkColor($lblProgress, $GUI_BKCOLOR_TRANSPARENT)
+
+$prgBg = GUICtrlCreateLabel("", 20, 190, 320, 12)
+GUICtrlSetBkColor($prgBg, 0x2B2B2B)
+
+$prgFill = GUICtrlCreateLabel("", 21, 191, 16, 10)
+GUICtrlSetBkColor($prgFill, 0xFF9800)
+
+$txtLog = GUICtrlCreateEdit("", 20, 210, 320, 162, BitOR($ES_AUTOVSCROLL, $ES_READONLY, $WS_VSCROLL))
 GUICtrlSetBkColor($txtLog, 0x1F1F1F)
 GUICtrlSetColor($txtLog, 0xE0E0E0)
 GUICtrlSetFont($txtLog, 8.5, 400, 0, "Consolas")
 
 GUISetState(@SW_SHOW, $hGUI)
+PumpWait(80)
 
 LogInfo("Engine siap (port " & $PORT & ").")
 If $CAPTURE = "" Then LogInfo("[!] YunuCapture.exe tidak ditemukan di folder Engine.")
 
-; Siapkan output virtual dengan tampilan loading agar tombol tidak dikira macet
 SetupVirtualAudioSafe()
 
 SetStateDisconnected("BELUM TERSAMBUNG")
@@ -192,64 +204,77 @@ While 1
 WEnd
 
 ; ==============================================================================
-; SISTEM AUDIO VIRTUAL (RESET AWAL, RENAME YUNUAUDIO, SOUNDVOLUMEVIEW)
+; SISTEM AUDIO VIRTUAL (PNPUTIL + RENAME WIN32 + SOUNDVOLUMEVIEW)
 ; ==============================================================================
 
 Func SetupVirtualAudioSafe()
-    Local $tWait = 0
+    Local $aMedia = 0
     Local $aRender = 0
+    Local $bRenamed = False
+    Local $tWait = 0
 
     SetBusy("MENYIAPKAN OUTPUT...")
-    SetProgress(10, "Memeriksa sisa output & konfigurasi lama...")
+    SetProgress(8, "Memeriksa sisa output sesi sebelumnya...")
+    PumpWait(150)
 
-    If $SVV = "" Or Not FileExists($SVV) Then
-        LogInfo("[!] SoundVolumeView.exe tidak ada: output audio tidak diatur otomatis.")
-        SetProgress(100, "Selesai.")
-        Return
-    EndIf
-
-    ; 1. Jika ada sisa output virtual aktif / cadangan sesi sebelumnya, bersihkan dulu
-    If FileExists($BACKUP_PROFILE) Or HasActiveVirtualEndpoint() Then
-        LogInfo("Membersihkan sisa konfigurasi output sebelumnya...")
-        SetProgress(20, "Membersihkan sisa output sebelumnya...")
-        If FileExists($BACKUP_PROFILE) Then
-            RunWaitSmooth('"' & $SVV & '" /LoadProfile "' & $BACKUP_PROFILE & '"', $ENGINE_DIR, 20, 28, 800)
+    ; 1. Bersihkan sisa output virtual jika masih ada/aktif dari sesi sebelumnya
+    $aRender = FindVirtualEndpointGuids("Render")
+    If FileExists($BACKUP_PROFILE) Or UBound($aRender) > 0 Then
+        LogInfo("Membersihkan sisa output & konfigurasi sebelumnya...")
+        SetProgress(18, "Menghapus sisa output sebelumnya...")
+        If $SVV <> "" And FileExists($SVV) And FileExists($BACKUP_PROFILE) Then
+            RunWaitSmooth('"' & $SVV & '" /LoadProfile "' & $BACKUP_PROFILE & '"', $ENGINE_DIR, 18, 25, 700)
             FileDelete($BACKUP_PROFILE)
         EndIf
-        DisableAllVirtualEndpoints()
+        DisableAllVirtualOutput()
         PumpWait(250)
     EndIf
 
-    ; 2. Simpan cadangan profil audio asli Windows yang sudah bersih
-    SetProgress(35, "Mencadangkan konfigurasi audio asli...")
-    RunWaitSmooth('"' & $SVV & '" /SaveProfile "' & $BACKUP_PROFILE & '"', $ENGINE_DIR, 35, 45, 700)
+    ; 2. Cadangkan profil audio asli Windows (saat output virtual nonaktif)
+    If $SVV <> "" And FileExists($SVV) Then
+        SetProgress(32, "Mencadangkan konfigurasi audio asli...")
+        RunWaitSmooth('"' & $SVV & '" /SaveProfile "' & $BACKUP_PROFILE & '"', $ENGINE_DIR, 32, 42, 600)
+    EndIf
 
-    ; 3. Pasang driver virtual jika perangkat virtual belum terpasang di Windows
-    $aRender = FindVirtualEndpointGuids("Render")
-    If UBound($aRender) = 0 Then
+    ; 3. Pasang driver virtual jika belum terpasang, atau aktifkan ulang via PnPUtil
+    $aMedia = FindVirtualMediaInstanceIds()
+    If UBound($aMedia) = 0 Then
         If $VBCABLE_SETUP <> "" And FileExists($VBCABLE_SETUP) Then
             LogInfo("Memasang output audio YunuAudio (mohon tunggu)...")
-            SetProgress(50, "Memasang output audio YunuAudio...")
+            SetProgress(46, "Memasang driver output YunuAudio...")
             $bDriverJustInstalled = True
-            RunWaitSmooth('"' & $VBCABLE_SETUP & '" -i -h', $ENGINE_DIR, 50, 75, 6000)
+            RunWaitSmooth('"' & $VBCABLE_SETUP & '" -i -h', $ENGINE_DIR, 46, 68, 6000)
 
             $tWait = TimerInit()
             While UBound(FindVirtualEndpointGuids("Render")) = 0 And TimerDiff($tWait) < 12000
-                PumpWait(500)
-                SetProgress(76, "Menunggu Windows mengenali output baru...")
+                PumpWait(400)
+                SetProgress(70, "Menunggu Windows mengenali perangkat output...")
             WEnd
+            $aMedia = FindVirtualMediaInstanceIds()
         Else
             LogInfo("[!] Driver output virtual tidak ditemukan di folder Engine.")
         EndIf
+    Else
+        SetProgress(55, "Mengaktifkan perangkat output YunuAudio...")
+        EnableVirtualMediaDevices($aMedia)
+        $tWait = TimerInit()
+        While UBound(FindVirtualEndpointGuids("Render")) = 0 And TimerDiff($tWait) < 6000
+            PumpWait(250)
+        WEnd
     EndIf
 
-    ; 4. Rename menjadi YunuAudio, lalu aktifkan & jadikan default
+    ; 4. Rename menjadi YunuAudio di MMDevices + Enum + refresh cache Windows Audio
     $aRender = FindVirtualEndpointGuids("Render")
     If UBound($aRender) > 0 Then
-        SetProgress(82, "Mengatur nama output menjadi YunuAudio...")
-        RenameVirtualEndpointsToYunuAudio()
+        SetProgress(78, "Mengubah nama output menjadi YunuAudio...")
+        $bRenamed = RenameAllVirtualToYunuAudio()
 
-        SetProgress(92, "Mengaktifkan output YunuAudio...")
+        If $bRenamed Then
+            SetProgress(86, "Menyegarkan nama YunuAudio di Windows...")
+            RefreshAudioCache($aMedia)
+        EndIf
+
+        SetProgress(94, "Mengatur YunuAudio sebagai output aktif...")
         ActivateAndUnmuteVirtualAudio(True)
 
         If HasActiveVirtualEndpoint() Then
@@ -261,14 +286,87 @@ Func SetupVirtualAudioSafe()
         LogInfo("[!] Output virtual tidak terdeteksi. Memakai output audio bawaan Windows.")
     EndIf
 
-    SetProgress(100, "Output siap.")
-    PumpWait(200)
+    SetProgress(100, "Output YunuAudio siap digunakan.")
+    PumpWait(250)
 EndFunc   ;==>SetupVirtualAudioSafe
 
-; $bFull = True : aktifkan + unmute + volume 100 + default. False : cukup pastikan aktif & default.
+; Cari driver induk VB-Audio / YunuAudio di HKLM64\SYSTEM\CurrentControlSet\Enum\ROOT\MEDIA
+Func FindVirtualMediaInstanceIds()
+    Local $sBase = "HKEY_LOCAL_MACHINE64\SYSTEM\CurrentControlSet\Enum\ROOT\MEDIA"
+    Local $aRes[0]
+    Local $i = 1, $sSub = "", $sKey = ""
+    Local $sDesc = "", $sMfg = "", $sFriend = "", $sSvc = "", $n = 0
+
+    While 1
+        $sSub = RegEnumKey($sBase, $i)
+        If @error Then ExitLoop
+        $sKey = $sBase & "\" & $sSub
+        $sDesc = RegRead($sKey, "DeviceDesc")
+        $sMfg = RegRead($sKey, "Mfg")
+        $sFriend = RegRead($sKey, "FriendlyName")
+        $sSvc = RegRead($sKey, "Service")
+
+        If StringInStr($sDesc, "VB-Audio") Or StringInStr($sDesc, "CABLE") Or _
+           StringInStr($sMfg, "VB-Audio") Or StringInStr($sFriend, $APP_AUDIO_NAME) Or _
+           StringInStr($sSvc, "VBAudioVAC") Then
+            $n = UBound($aRes)
+            ReDim $aRes[$n + 1]
+            $aRes[$n] = "ROOT\MEDIA\" & $sSub
+        EndIf
+        $i += 1
+    WEnd
+    Return $aRes
+EndFunc   ;==>FindVirtualMediaInstanceIds
+
+Func EnableVirtualMediaDevices($aMedia)
+    Local $i = 0
+    For $i = 0 To UBound($aMedia) - 1
+        RunWaitSmooth('"' & $PNPUTIL & '" /enable-device "' & $aMedia[$i] & '"', $ENGINE_DIR, 56, 68, 900)
+    Next
+EndFunc   ;==>EnableVirtualMediaDevices
+
+Func DisableVirtualMediaDevices($aMedia)
+    Local $i = 0
+    For $i = 0 To UBound($aMedia) - 1
+        RunWait('"' & $PNPUTIL & '" /disable-device "' & $aMedia[$i] & '"', $ENGINE_DIR, @SW_HIDE)
+    Next
+EndFunc   ;==>DisableVirtualMediaDevices
+
+Func DisableAllVirtualOutput()
+    Local $aRender = FindVirtualEndpointGuids("Render")
+    Local $aCapture = FindVirtualEndpointGuids("Capture")
+    Local $aMedia = FindVirtualMediaInstanceIds()
+    Local $i = 0
+
+    If $SVV <> "" And FileExists($SVV) Then
+        For $i = 0 To UBound($aRender) - 1
+            RunWait('"' & $SVV & '" /Disable "{0.0.0.00000000}.' & $aRender[$i] & '"', $ENGINE_DIR, @SW_HIDE)
+        Next
+        For $i = 0 To UBound($aCapture) - 1
+            RunWait('"' & $SVV & '" /Disable "{0.0.1.00000000}.' & $aCapture[$i] & '"', $ENGINE_DIR, @SW_HIDE)
+        Next
+    EndIf
+
+    If UBound($aMedia) > 0 Then
+        DisableVirtualMediaDevices($aMedia)
+    EndIf
+EndFunc   ;==>DisableAllVirtualOutput
+
+Func RefreshAudioCache($aMedia)
+    If UBound($aMedia) > 0 Then
+        DisableVirtualMediaDevices($aMedia)
+        PumpWait(300)
+        EnableVirtualMediaDevices($aMedia)
+        PumpWait(400)
+    EndIf
+    ; Gunakan '&' agar net start Audiosrv tetap jalan walau AudioEndpointBuilder sudah hidup
+    RunWaitSmooth('cmd.exe /c net stop Audiosrv /y & net start AudioEndpointBuilder & net start Audiosrv', $ENGINE_DIR, 86, 93, 2000)
+    PumpWait(300)
+EndFunc   ;==>RefreshAudioCache
+
+; $bFull = True : aktifkan + unmute + volume 100 + default. False : pastikan aktif & default.
 Func ActivateAndUnmuteVirtualAudio($bFull = False)
     Local $aRender = FindVirtualEndpointGuids("Render")
-    Local $aIds[2] = [$APP_AUDIO_NAME, $CABLE_NAME]
     Local $i = 0, $sEpId = ""
 
     If $SVV = "" Or Not FileExists($SVV) Then Return
@@ -289,35 +387,9 @@ Func ActivateAndUnmuteVirtualAudio($bFull = False)
             RunWait('"' & $SVV & '" /SetDefault "' & $sEpId & '" all', $ENGINE_DIR, @SW_HIDE)
         Next
         $bAudioSwitched = True
-    Else
-        For $i = 0 To UBound($aIds) - 1
-            RunWait('"' & $SVV & '" /Enable "' & $aIds[$i] & '"', $ENGINE_DIR, @SW_HIDE)
-        Next
     EndIf
 EndFunc   ;==>ActivateAndUnmuteVirtualAudio
 
-Func DisableAllVirtualEndpoints()
-    Local $aRender = FindVirtualEndpointGuids("Render")
-    Local $aCapture = FindVirtualEndpointGuids("Capture")
-    Local $aFallback[3] = [$APP_AUDIO_NAME, $CABLE_NAME, "CABLE Output"]
-    Local $i = 0
-
-    If $SVV = "" Or Not FileExists($SVV) Then Return
-
-    For $i = 0 To UBound($aRender) - 1
-        RunWait('"' & $SVV & '" /Disable "{0.0.0.00000000}.' & $aRender[$i] & '"', $ENGINE_DIR, @SW_HIDE)
-    Next
-    For $i = 0 To UBound($aCapture) - 1
-        RunWait('"' & $SVV & '" /Disable "{0.0.1.00000000}.' & $aCapture[$i] & '"', $ENGINE_DIR, @SW_HIDE)
-    Next
-    If UBound($aRender) = 0 And UBound($aCapture) = 0 Then
-        For $i = 0 To UBound($aFallback) - 1
-            RunWait('"' & $SVV & '" /Disable "' & $aFallback[$i] & '"', $ENGINE_DIR, @SW_HIDE)
-        Next
-    EndIf
-EndFunc   ;==>DisableAllVirtualEndpoints
-
-; Cari semua GUID endpoint virtual (baik bernama CABLE maupun yang sudah direname ke YunuAudio)
 Func FindVirtualEndpointGuids($sType = "Render")
     Local $sBase = "HKEY_LOCAL_MACHINE64\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\" & $sType
     Local $aRes[0]
@@ -377,117 +449,128 @@ Func HasAnyActiveRenderEndpoint()
     Return False
 EndFunc   ;==>HasAnyActiveRenderEndpoint
 
-; Ubah nama CABLE Input / VB-Audio Virtual Cable menjadi YunuAudio
-Func RenameVirtualEndpointsToYunuAudio()
+; Rename semua registry endpoint & Enum ke YunuAudio memakai WinAPI native
+Func RenameAllVirtualToYunuAudio()
     Local $aRender = FindVirtualEndpointGuids("Render")
-    Local $sBase = "HKEY_LOCAL_MACHINE64\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
-    Local $i = 0, $sPropKey = "", $sDesc = "", $sIf = "", $bNeedPs = False, $iErr = 0
+    Local $aCapture = FindVirtualEndpointGuids("Capture")
+    Local $aMedia = FindVirtualMediaInstanceIds()
+    Local $bChanged = False
+    Local $i = 0, $sRel = "", $sEnumRel = "", $sCur1 = "", $sCur2 = ""
 
     For $i = 0 To UBound($aRender) - 1
-        $sPropKey = $sBase & "\" & $aRender[$i] & "\Properties"
-        $sDesc = RegRead($sPropKey, "{a45c254e-df1c-4efd-8020-67d146a850e0},2")
-        $sIf = RegRead($sPropKey, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")
-        If $sDesc = $APP_AUDIO_NAME And $sIf = $APP_AUDIO_NAME Then ContinueLoop
+        $sRel = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\" & $aRender[$i] & "\Properties"
+        $sCur1 = RegRead("HKEY_LOCAL_MACHINE64\" & $sRel, "{a45c254e-df1c-4efd-8020-67d146a850e0},2")
+        $sCur2 = RegRead("HKEY_LOCAL_MACHINE64\" & $sRel, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")
+        If $sCur1 <> $APP_AUDIO_NAME Or $sCur2 <> $APP_AUDIO_NAME Then
+            If WriteProtectedReg($sRel, "{a45c254e-df1c-4efd-8020-67d146a850e0},2", $APP_AUDIO_NAME) Then $bChanged = True
+            If WriteProtectedReg($sRel, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6", $APP_AUDIO_NAME) Then $bChanged = True
+        EndIf
 
-        RegWrite($sPropKey, "{a45c254e-df1c-4efd-8020-67d146a850e0},2", "REG_SZ", $APP_AUDIO_NAME)
-        $iErr = @error
-        RegWrite($sPropKey, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6", "REG_SZ", $APP_AUDIO_NAME)
-        If $iErr <> 0 Or @error <> 0 Then $bNeedPs = True
-
-        If $bNeedPs Then
-            RenameViaPowerShell("SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\" & $aRender[$i] & "\Properties", $APP_AUDIO_NAME)
-            $bNeedPs = False
+        $sEnumRel = "SYSTEM\CurrentControlSet\Enum\SWD\MMDEVAPI\{0.0.0.00000000}." & $aRender[$i]
+        If RegRead("HKEY_LOCAL_MACHINE64\" & $sEnumRel, "FriendlyName") <> $APP_AUDIO_NAME Then
+            WriteProtectedReg($sEnumRel, "FriendlyName", $APP_AUDIO_NAME)
         EndIf
     Next
-EndFunc   ;==>RenameVirtualEndpointsToYunuAudio
 
-; Ambil alih ownership subkey Properties jika Windows menolak RegWrite biasa
-Func RenameViaPowerShell($sRelSubKey, $sNewName)
-    Local $sPsFile = @TempDir & "\yunu_rename.ps1"
-    Local $hF = FileOpen($sPsFile, 2)
-    If $hF = -1 Then Return False
+    For $i = 0 To UBound($aCapture) - 1
+        $sRel = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\" & $aCapture[$i] & "\Properties"
+        $sCur1 = RegRead("HKEY_LOCAL_MACHINE64\" & $sRel, "{a45c254e-df1c-4efd-8020-67d146a850e0},2")
+        $sCur2 = RegRead("HKEY_LOCAL_MACHINE64\" & $sRel, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")
+        If $sCur1 <> $APP_AUDIO_NAME & " In" Or $sCur2 <> $APP_AUDIO_NAME Then
+            WriteProtectedReg($sRel, "{a45c254e-df1c-4efd-8020-67d146a850e0},2", $APP_AUDIO_NAME & " In")
+            WriteProtectedReg($sRel, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6", $APP_AUDIO_NAME)
+        EndIf
+    Next
 
-    Local $sScript = _
-        'param([string]$SubKey, [string]$NewName)' & @CRLF & _
-        '$code = @"' & @CRLF & _
-        'using System;' & @CRLF & _
-        'using System.Runtime.InteropServices;' & @CRLF & _
-        'using System.Security.AccessControl;' & @CRLF & _
-        'using System.Security.Principal;' & @CRLF & _
-        'using Microsoft.Win32;' & @CRLF & _
-        'public class YunuRegOwn {' & @CRLF & _
-        '    [DllImport("advapi32.dll", ExactSpelling=true, SetLastError=true)]' & @CRLF & _
-        '    static extern bool OpenProcessToken(IntPtr h, int acc, ref IntPtr phtok);' & @CRLF & _
-        '    [DllImport("advapi32.dll", SetLastError=true)]' & @CRLF & _
-        '    static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);' & @CRLF & _
-        '    [DllImport("advapi32.dll", ExactSpelling=true, SetLastError=true)]' & @CRLF & _
-        '    static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TP newst, int len, IntPtr prev, IntPtr relen);' & @CRLF & _
-        '    [StructLayout(LayoutKind.Sequential, Pack=1)]' & @CRLF & _
-        '    struct TP { public int Count; public long Luid; public int Attr; }' & @CRLF & _
-        '    static void EnablePriv(string priv) {' & @CRLF & _
-        '        IntPtr htok = IntPtr.Zero;' & @CRLF & _
-        '        OpenProcessToken(System.Diagnostics.Process.GetCurrentProcess().Handle, 0x28, ref htok);' & @CRLF & _
-        '        TP tp; tp.Count = 1; tp.Luid = 0; tp.Attr = 2;' & @CRLF & _
-        '        LookupPrivilegeValue(null, priv, ref tp.Luid);' & @CRLF & _
-        '        AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);' & @CRLF & _
-        '    }' & @CRLF & _
-        '    public static void GrantAndWrite(string subKey, string newName) {' & @CRLF & _
-        '        EnablePriv("SeTakeOwnershipPrivilege");' & @CRLF & _
-        '        EnablePriv("SeRestorePrivilege");' & @CRLF & _
-        '        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);' & @CRLF & _
-        '        using (var k = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64).OpenSubKey(subKey, RegistryKeyPermissionCheck.ReadWriteSubTree, RegistryRights.TakeOwnership)) {' & @CRLF & _
-        '            if (k == null) return;' & @CRLF & _
-        '            var acl = k.GetAccessControl(AccessControlSections.None);' & @CRLF & _
-        '            acl.SetOwner(admins);' & @CRLF & _
-        '            k.SetAccessControl(acl);' & @CRLF & _
-        '        }' & @CRLF & _
-        '        using (var k2 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64).OpenSubKey(subKey, RegistryKeyPermissionCheck.ReadWriteSubTree, RegistryRights.ChangePermissions)) {' & @CRLF & _
-        '            if (k2 == null) return;' & @CRLF & _
-        '            var acl2 = k2.GetAccessControl();' & @CRLF & _
-        '            acl2.SetAccessRule(new RegistryAccessRule(admins, RegistryRights.FullControl, InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));' & @CRLF & _
-        '            k2.SetAccessControl(acl2);' & @CRLF & _
-        '        }' & @CRLF & _
-        '        using (var k3 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64).OpenSubKey(subKey, true)) {' & @CRLF & _
-        '            if (k3 == null) return;' & @CRLF & _
-        '            k3.SetValue("{a45c254e-df1c-4efd-8020-67d146a850e0},2", newName, RegistryValueKind.String);' & @CRLF & _
-        '            k3.SetValue("{b3f8fa53-0004-438e-9003-51a46e139bfc},6", newName, RegistryValueKind.String);' & @CRLF & _
-        '        }' & @CRLF & _
-        '    }' & @CRLF & _
-        '}' & @CRLF & _
-        '"@' & @CRLF & _
-        'Add-Type -TypeDefinition $code -Language CSharp' & @CRLF & _
-        '[YunuRegOwn]::GrantAndWrite($SubKey, $NewName)' & @CRLF
+    For $i = 0 To UBound($aMedia) - 1
+        $sEnumRel = "SYSTEM\CurrentControlSet\Enum\" & $aMedia[$i]
+        If RegRead("HKEY_LOCAL_MACHINE64\" & $sEnumRel, "FriendlyName") <> $APP_AUDIO_NAME Then
+            WriteProtectedReg($sEnumRel, "FriendlyName", $APP_AUDIO_NAME)
+        EndIf
+    Next
 
-    FileWrite($hF, $sScript)
-    FileClose($hF)
+    Return $bChanged
+EndFunc   ;==>RenameAllVirtualToYunuAudio
 
-    RunCapture('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' & $sPsFile & '" -SubKey "' & $sRelSubKey & '" -NewName "' & $sNewName & '"', 8000)
-    FileDelete($sPsFile)
+Func WriteProtectedReg($sRelSubKey, $sValName, $sValData)
+    RegWrite("HKEY_LOCAL_MACHINE64\" & $sRelSubKey, $sValName, "REG_SZ", $sValData)
+    If Not @error Then Return True
+
+    If TakeOwnershipAndGrantAdmins($sRelSubKey) Then
+        RegWrite("HKEY_LOCAL_MACHINE64\" & $sRelSubKey, $sValName, "REG_SZ", $sValData)
+        If Not @error Then Return True
+    EndIf
+    Return False
+EndFunc   ;==>WriteProtectedReg
+
+Func TakeOwnershipAndGrantAdmins($sRelSubKey)
+    Local $hToken = _Security__OpenProcessToken(_WinAPI_GetCurrentProcess(), BitOR($TOKEN_ADJUST_PRIVILEGES, $TOKEN_QUERY))
+    If $hToken Then
+        _Security__SetPrivilege($hToken, "SeTakeOwnershipPrivilege", True)
+        _Security__SetPrivilege($hToken, "SeRestorePrivilege", True)
+        _WinAPI_CloseHandle($hToken)
+    EndIf
+
+    Local $tSidAdmins = _Security__StringSidToSid("S-1-5-32-544")
+    If @error Or Not IsDllStruct($tSidAdmins) Then Return False
+    Local $pSidAdmins = DllStructGetPtr($tSidAdmins)
+
+    Local Const $iWriteOwner = 0x00080000
+    Local Const $iWriteDac = 0x00040000
+    Local Const $iSeRegKey = 4
+    Local Const $iOwnerSecInfo = 1
+    Local Const $iDaclSecInfo = 4
+
+    Local $hKey = _WinAPI_RegOpenKey($HKEY_LOCAL_MACHINE, $sRelSubKey, BitOR($iWriteOwner, $KEY_WOW64_64KEY))
+    If @error Or $hKey = 0 Then Return False
+    DllCall("advapi32.dll", "dword", "SetSecurityInfo", "handle", $hKey, "int", $iSeRegKey, "dword", $iOwnerSecInfo, "ptr", $pSidAdmins, "ptr", 0, "ptr", 0, "ptr", 0)
+    _WinAPI_RegCloseKey($hKey)
+
+    Local $aSD = DllCall("advapi32.dll", "bool", "ConvertStringSecurityDescriptorToSecurityDescriptorW", _
+            "wstr", "D:(A;;GA;;;BA)(A;;GA;;;SY)", "dword", 1, "ptr*", 0, "dword*", 0)
+    If @error Or Not IsArray($aSD) Or Not $aSD[0] Then Return False
+    Local $pSD = $aSD[3]
+
+    Local $aDacl = DllCall("advapi32.dll", "bool", "GetSecurityDescriptorDacl", _
+            "ptr", $pSD, "bool*", 0, "ptr*", 0, "bool*", 0)
+    If @error Or Not IsArray($aDacl) Or Not $aDacl[0] Or Not $aDacl[2] Then
+        _WinAPI_LocalFree($pSD)
+        Return False
+    EndIf
+    Local $pDacl = $aDacl[3]
+
+    $hKey = _WinAPI_RegOpenKey($HKEY_LOCAL_MACHINE, $sRelSubKey, BitOR($iWriteDac, $KEY_WOW64_64KEY))
+    If @error Or $hKey = 0 Then
+        _WinAPI_LocalFree($pSD)
+        Return False
+    EndIf
+    Local $aRes = DllCall("advapi32.dll", "dword", "SetSecurityInfo", "handle", $hKey, "int", $iSeRegKey, "dword", $iDaclSecInfo, "ptr", 0, "ptr", 0, "ptr", $pDacl, "ptr", 0)
+    Local $iDllErr = @error
+    _WinAPI_RegCloseKey($hKey)
+    _WinAPI_LocalFree($pSD)
+
+    If $iDllErr Or Not IsArray($aRes) Or $aRes[0] <> 0 Then Return False
     Return True
-EndFunc   ;==>RenameViaPowerShell
+EndFunc   ;==>TakeOwnershipAndGrantAdmins
 
 Func RestoreAudioDefaults($bForceDisable = True)
-    If $SVV = "" Or Not FileExists($SVV) Then Return
-
-    If $bAudioSwitched Then
-        If FileExists($BACKUP_PROFILE) Then
-            RunWait('"' & $SVV & '" /LoadProfile "' & $BACKUP_PROFILE & '"', $ENGINE_DIR, @SW_HIDE)
-            FileDelete($BACKUP_PROFILE)
-        Else
-            RunWait('"' & $SVV & '" /SetDefault "Speakers" all', $ENGINE_DIR, @SW_HIDE)
+    If $SVV <> "" And FileExists($SVV) Then
+        If $bAudioSwitched Then
+            If FileExists($BACKUP_PROFILE) Then
+                RunWait('"' & $SVV & '" /LoadProfile "' & $BACKUP_PROFILE & '"', $ENGINE_DIR, @SW_HIDE)
+                FileDelete($BACKUP_PROFILE)
+            Else
+                RunWait('"' & $SVV & '" /SetDefault "Speakers" all', $ENGINE_DIR, @SW_HIDE)
+            EndIf
+            $bAudioSwitched = False
         EndIf
-        $bAudioSwitched = False
     EndIf
 
     If $bForceDisable Then
-        DisableAllVirtualEndpoints()
+        DisableAllVirtualOutput()
     EndIf
 EndFunc   ;==>RestoreAudioDefaults
 
-; ------------------------------------------------------------------------------
-; Siapkan output audio Windows tanpa memblokir paksa saat --check tidak cocok.
-; Return: 0 = lanjut jalankan engine, -2 = exe tidak bisa dijalankan
-; ------------------------------------------------------------------------------
 Func EnsureAudioOutputReady()
     Local $sOut = "", $iTry = 0, $iErr = 0, $bRecognized = False
 
@@ -514,7 +597,7 @@ Func EnsureAudioOutputReady()
     RemedyEnableOutput()
 
     For $iTry = 1 To 3
-        PumpWait(1000)
+        PumpWait(900)
         If $bRecognized Then
             $sOut = RunCapture('"' & $CAPTURE & '" --check', 7000)
             If StringInStr($sOut, "[ACTIVE]") Then
@@ -540,13 +623,15 @@ Func EnsureAudioOutputReady()
 EndFunc   ;==>EnsureAudioOutputReady
 
 Func RemedyEnableOutput()
-    Local $aRender = FindVirtualEndpointGuids("Render")
-    Local $aIds[2] = [$APP_AUDIO_NAME, $CABLE_NAME]
+    Local $aMedia = FindVirtualMediaInstanceIds()
+    Local $aRender = 0
     Local $i = 0, $sEpId = ""
 
+    If UBound($aMedia) > 0 Then EnableVirtualMediaDevices($aMedia)
     RunCapture('sc start AudioEndpointBuilder', 6000)
     RunCapture('sc start Audiosrv', 6000)
 
+    $aRender = FindVirtualEndpointGuids("Render")
     If $SVV <> "" And FileExists($SVV) Then
         For $i = 0 To UBound($aRender) - 1
             $sEpId = "{0.0.0.00000000}." & $aRender[$i]
@@ -555,14 +640,6 @@ Func RemedyEnableOutput()
             RunWait('"' & $SVV & '" /SetVolume "' & $sEpId & '" 100', $ENGINE_DIR, @SW_HIDE)
             RunWait('"' & $SVV & '" /SetDefault "' & $sEpId & '" all', $ENGINE_DIR, @SW_HIDE)
         Next
-        If UBound($aRender) = 0 Then
-            For $i = 0 To UBound($aIds) - 1
-                RunWait('"' & $SVV & '" /Enable "' & $aIds[$i] & '"', $ENGINE_DIR, @SW_HIDE)
-                RunWait('"' & $SVV & '" /Unmute "' & $aIds[$i] & '"', $ENGINE_DIR, @SW_HIDE)
-                RunWait('"' & $SVV & '" /SetVolume "' & $aIds[$i] & '" 100', $ENGINE_DIR, @SW_HIDE)
-                RunWait('"' & $SVV & '" /SetDefault "' & $aIds[$i] & '" all', $ENGINE_DIR, @SW_HIDE)
-            Next
-        EndIf
         $bAudioSwitched = True
     EndIf
 EndFunc   ;==>RemedyEnableOutput
@@ -621,26 +698,22 @@ Func ConnectAudio($bManual = False)
         Return ConnectFail("ENGINE AUDIO HILANG", "[X] YunuCapture.exe tidak ditemukan di folder Engine.")
     EndIf
 
-    ; 1. Pastikan output YunuAudio aktif & default Windows
     SetProgress(25, "Memastikan output YunuAudio aktif...")
     ActivateAndUnmuteVirtualAudio(True)
     PumpWait(200)
 
-    ; 2. Cek output audio Windows (non-blocking)
     $iCheck = EnsureAudioOutputReady()
     If $iCheck = -2 Then
         SetProgress(0, "Engine audio gagal dijalankan.")
         Return ConnectFail("ENGINE AUDIO GAGAL", "[X] YunuCapture.exe tidak bisa dijalankan (butuh Windows 64-bit).")
     EndIf
 
-    ; 3. Pastikan APK terpasang di HP
     SetProgress(55, "Memeriksa aplikasi YunuAudio di HP...")
     If Not EnsureReceiverInstalled() Then
         SetProgress(0, "Gagal memasang APK.")
         Return ConnectFail("GAGAL PASANG APK", "")
     EndIf
 
-    ; 4. Bersihkan sisa sesi lama
     SetBusy("MENYAMBUNGKAN...")
     SetProgress(70, "Membersihkan sesi sambungan sebelumnya...")
     Adb('shell am stopservice -n ' & $SVC, 3000)
@@ -649,7 +722,6 @@ Func ConnectAudio($bManual = False)
     KillStrayEngines()
     PumpWait(300)
 
-    ; 5. Jembatan port USB
     SetProgress(82, "Membuat jembatan port USB...")
     Adb('reverse tcp:' & $PORT & ' tcp:' & $PORT, 5000)
     $sRev = Adb('reverse --list', 4000)
@@ -658,7 +730,6 @@ Func ConnectAudio($bManual = False)
         Return ConnectFail("ADB REVERSE GAGAL", "[X] Gagal membuat jembatan port USB: " & CleanLine($sRev))
     EndIf
 
-    ; 6. Nyalakan penangkap audio PC dulu
     SetProgress(90, "Menyalakan penangkap audio PC...")
     If Not StartCaptureEngine() Then
         SetProgress(0, "Engine audio berhenti.")
@@ -666,7 +737,6 @@ Func ConnectAudio($bManual = False)
     EndIf
     PumpWait(300)
 
-    ; 7. Nyalakan service di HP
     SetProgress(96, "Menyalakan penerima suara di HP...")
     If Not StartPhoneService() Then
         SetProgress(0, "Service HP gagal dijalankan.")
@@ -720,9 +790,6 @@ Func HandleUnplug()
     LogInfo("[!] Kabel USB dicabut. Menunggu dicolok lagi...")
 EndFunc   ;==>HandleUnplug
 
-; ------------------------------------------------------------------------------
-; Pemantauan saat idle (belum tersambung): deteksi HP + auto-connect
-; ------------------------------------------------------------------------------
 Func PollIdle()
     Local $sStat = ""
 
@@ -758,9 +825,6 @@ Func PollIdle()
     EndIf
 EndFunc   ;==>PollIdle
 
-; ------------------------------------------------------------------------------
-; Pemantauan saat tersambung: penangkap audio, kabel USB, service di HP
-; ------------------------------------------------------------------------------
 Func WatchConnected()
     Local $iExit = -1
     Local $sWhy = "ENGINE AUDIO ERROR"
@@ -768,7 +832,6 @@ Func WatchConnected()
 
     $tWatch = TimerInit()
 
-    ; --- 1. Engine penangkap audio ---
     If ProcessExists($hEngine) Then
         If TimerDiff($tEngineStart) > 30000 Then $iRestarts = 0
     Else
@@ -803,7 +866,6 @@ Func WatchConnected()
         EndIf
     EndIf
 
-    ; --- 2. HP tidak kunjung terhubung ke PC ---
     If Not $bPhoneConnected And Not $bWarnNoPhone And TimerDiff($tEngineStart) > 8000 Then
         $bWarnNoPhone = True
         LogInfo("[!] HP belum terhubung ke PC setelah 8 detik.")
@@ -815,7 +877,6 @@ Func WatchConnected()
         EndIf
     EndIf
 
-    ; --- 3. Pemeriksaan lebih berat tiap 4 detik (beri waktu inisialisasi awal 5 detik) ---
     If TimerDiff($tEngineStart) > 5000 And TimerDiff($tDeep) > 4000 Then
         $tDeep = TimerInit()
         $sOut = RunCapture('"' & $ADB & '" devices', 5000)
@@ -833,7 +894,7 @@ Func WatchConnected()
 EndFunc   ;==>WatchConnected
 
 ; ==============================================================================
-; DIAGNOSTIK ALIRAN AUDIO (membaca pesan & statistik dari YunuCapture.exe)
+; DIAGNOSTIK ALIRAN AUDIO
 ; ==============================================================================
 
 Func ResetDiagnostics()
@@ -1020,7 +1081,7 @@ Func ServiceAlive()
 EndFunc   ;==>ServiceAlive
 
 ; ==============================================================================
-; ENGINE AUDIO PC (YunuCapture.exe - WASAPI loopback)
+; ENGINE AUDIO PC (YunuCapture.exe)
 ; ==============================================================================
 
 Func StartCaptureEngine()
@@ -1106,7 +1167,7 @@ Func CloseH($h)
 EndFunc   ;==>CloseH
 
 ; ==============================================================================
-; TAMPILAN GUI STATE & LOADING BAR
+; TAMPILAN GUI STATE & CUSTOM FLAT LOADING BAR
 ; ==============================================================================
 
 Func SetBusy($sMsg)
@@ -1117,8 +1178,31 @@ Func SetBusy($sMsg)
 EndFunc   ;==>SetBusy
 
 Func SetProgress($iPct, $sTxt)
-    GUICtrlSetData($prgBar, $iPct)
-    GUICtrlSetData($lblProgress, $sTxt)
+    Local $iW = 0
+
+    If $iPct < 0 Then $iPct = 0
+    If $iPct > 100 Then $iPct = 100
+
+    If $iPct = 0 Then
+        GUICtrlSetState($prgFill, $GUI_HIDE)
+    Else
+        $iW = Int((318 * $iPct) / 100)
+        If $iW < 4 Then $iW = 4
+        GUICtrlSetPos($prgFill, 21, 191, $iW, 10)
+        If $iPct >= 100 Then
+            GUICtrlSetBkColor($prgFill, 0x4CAF50)
+        Else
+            GUICtrlSetBkColor($prgFill, 0xFF9800)
+        EndIf
+        GUICtrlSetState($prgFill, $GUI_SHOW)
+    EndIf
+
+    If $iPct > 0 And $iPct < 100 Then
+        GUICtrlSetData($lblProgress, $sTxt & " (" & $iPct & "%)")
+    Else
+        GUICtrlSetData($lblProgress, $sTxt)
+    EndIf
+    GUIGetMsg()
 EndFunc   ;==>SetProgress
 
 Func SetStateConnected()
@@ -1160,7 +1244,7 @@ Func CleanLine($s)
 EndFunc   ;==>CleanLine
 
 ; ==============================================================================
-; KELUAR (tampilkan loading reset output & konfigurasi sebelum menutup app)
+; KELUAR (loading reset + hapus output virtual dari Windows sebelum tutup)
 ; ==============================================================================
 
 Func FastExit()
@@ -1168,26 +1252,30 @@ Func FastExit()
     $bExiting = True
 
     If $hGUI Then
-        SetBusy("MERESET KONFIGURASI...")
+        SetBusy("MERESET OUTPUT & KONFIGURASI...")
         SetProgress(15, "Tunggu, kami sedang mereset seluruh output dan konfigurasi...")
-        LogInfo("Menutup: mereset output audio & konfigurasi...")
-        PumpWait(120)
+        LogInfo("Menutup: mereset seluruh output & konfigurasi...")
+        PumpWait(200)
     EndIf
 
     StopEngine()
     KillStrayEngines()
-    SetProgress(40, "Tunggu, memutus sambungan perangkat...")
+    SetProgress(35, "Memutus sambungan HP & layanan...")
 
     If $IsConnected And $DeviceSerial <> "" Then
         RunCapture('"' & $ADB & '" -s "' & $DeviceSerial & '" shell am stopservice -n ' & $SVC, 2500)
         RunCapture('"' & $ADB & '" -s "' & $DeviceSerial & '" reverse --remove tcp:' & $PORT, 2500)
     EndIf
 
-    SetProgress(70, "Tunggu, mengembalikan output audio asli Windows...")
-    RestoreAudioDefaults(True)
+    SetProgress(65, "Mengembalikan speaker/output asli Windows...")
+    RestoreAudioDefaults(False)
+    PumpWait(150)
 
-    SetProgress(100, "Reset selesai. Menutup YunuAudio...")
-    PumpWait(300)
+    SetProgress(85, "Menghapus output virtual YunuAudio dari daftar...")
+    DisableAllVirtualOutput()
+
+    SetProgress(100, "Reset selesai. Menutup aplikasi...")
+    PumpWait(400)
     If $hGUI Then GUISetState(@SW_HIDE, $hGUI)
     Exit
 EndFunc   ;==>FastExit
@@ -1196,15 +1284,15 @@ EndFunc   ;==>FastExit
 ; UTILITAS
 ; ==============================================================================
 
-; Jalankan proses tanpa membuat GUI "Not Responding", sambil menggerakkan progress bar
 Func RunWaitSmooth($sCmd, $sWorkDir, $iStartPct, $iEndPct, $iEstMs)
     Local $iPID = Run($sCmd, $sWorkDir, @SW_HIDE)
     Local $hT = TimerInit()
     Local $iCur = $iStartPct
     Local $iSpan = $iEndPct - $iStartPct
+    Local $iW = 0
 
     If $iPID = 0 Then
-        GUICtrlSetData($prgBar, $iEndPct)
+        SetProgress($iEndPct, GUICtrlRead($lblProgress))
         Return 0
     EndIf
 
@@ -1212,16 +1300,20 @@ Func RunWaitSmooth($sCmd, $sWorkDir, $iStartPct, $iEndPct, $iEstMs)
         If $iEstMs > 0 And $iSpan > 1 Then
             $iCur = $iStartPct + Int(($iSpan - 1) * (TimerDiff($hT) / $iEstMs))
             If $iCur > $iEndPct - 1 Then $iCur = $iEndPct - 1
-            GUICtrlSetData($prgBar, $iCur)
+            $iW = Int((318 * $iCur) / 100)
+            If $iW < 4 Then $iW = 4
+            GUICtrlSetPos($prgFill, 21, 191, $iW, 10)
+            GUICtrlSetState($prgFill, $GUI_SHOW)
         EndIf
         GUIGetMsg()
         Sleep(35)
     WEnd
-    GUICtrlSetData($prgBar, $iEndPct)
+    $iW = Int((318 * $iEndPct) / 100)
+    If $iW < 4 Then $iW = 4
+    GUICtrlSetPos($prgFill, 21, 191, $iW, 10)
     Return 1
 EndFunc   ;==>RunWaitSmooth
 
-; Pengganti Sleep agar jendela GUI tetap responsif saat menunggu
 Func PumpWait($iMs)
     Local $hT = TimerInit()
     While TimerDiff($hT) < $iMs
@@ -1261,6 +1353,12 @@ Func RunCapture($sCmd, $iTimeout = 8000)
     If $bTimeout Then Return SetError(2, 0, $sOut)
     Return $sOut
 EndFunc   ;==>RunCapture
+
+Func GetPnpUtilPath()
+    Local $sSysNative = @WindowsDir & "\Sysnative\pnputil.exe"
+    If FileExists($sSysNative) Then Return $sSysNative
+    Return "pnputil.exe"
+EndFunc   ;==>GetPnpUtilPath
 
 Func LocateEngine()
     Local $targets[3] = [@ScriptDir & "\Engine", @ScriptDir, @ScriptDir & "\.."]
