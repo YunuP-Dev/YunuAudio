@@ -1,0 +1,1038 @@
+#AutoIt3Wrapper_OutFile=YunuAudio.exe
+#AutoIt3Wrapper_UseX64=n
+#AutoIt3Wrapper_UseUpx=n
+#AutoIt3Wrapper_Res_Description=YunuAudio
+#AutoIt3Wrapper_Res_Fileversion=1.2.1.0
+#NoTrayIcon
+#RequireAdmin
+
+Opt("MustDeclareVars", 1)
+Opt("RunErrorsFatal", 0) ; exe gagal dijalankan = return error, bukan crash
+
+#include <AutoItConstants.au3>
+#include <GUIConstantsEx.au3>
+#include <WindowsConstants.au3>
+#include <EditConstants.au3>
+#include <StaticConstants.au3>
+#include <Misc.au3>
+
+; Pastikan hanya satu instance berjalan
+If _Singleton("YunuAudio_SingleInstance_7F3A", 1) = 0 Then
+    MsgBox(48, "YunuAudio", "YunuAudio sudah berjalan.")
+    Exit
+EndIf
+
+; ==============================================================================
+; VARIABEL GLOBAL
+; ==============================================================================
+Global $INI = @ScriptDir & "\YunuAudio.ini"
+Global $PORT = Int(IniRead($INI, "Settings", "Port", "8080"))
+If $PORT < 1024 Or $PORT > 65535 Then $PORT = 8080
+Global $RENAME_DEVICE = Int(IniRead($INI, "Settings", "RenameDevice", "0")) ; kosmetik, default mati
+
+Global $PKG = "com.yunuaudio.receiver"
+Global $SVC = "com.yunuaudio.receiver/.AudioService"
+Global $CABLE_NAME = "CABLE Input"
+
+Global $ENGINE_DIR = ""
+Global $ADB = ""
+Global $CAPTURE = ""
+Global $APK = ""
+Global $SVV = ""
+Global $VBCABLE_SETUP = ""
+Global $BACKUP_PROFILE = @TempDir & "\YunuAudio_Backup.spr"
+Global $bAudioSwitched = False       ; True = default audio Windows pernah diubah (dipulihkan saat keluar)
+Global $bDriverJustInstalled = False ; True = installer VB-Cable dijalankan pada sesi ini
+
+; Status koneksi
+Global $IsConnected = False
+Global $bExiting = False
+Global $AutoSuppressed = False   ; True = auto-connect dijeda (user klik putus / gagal)
+Global $DeviceSerial = ""        ; serial HP yang sedang dipakai
+Global $FoundSerial = ""         ; serial hasil scan terakhir
+Global $LastStatus = ""
+Global $hEngine = 0       ; PID YunuCapture
+Global $hEngineProc = 0   ; handle proses (untuk membaca exit code)
+Global $sEngBuf = ""      ; sisa baris output engine yang belum lengkap
+Global $iRestarts = 0
+Global $iEngineLog = 0
+Global $tEngineStart = 0
+Global $tIdle = 0
+Global $tWatch = 0
+Global $tDeep = 0
+Global $tLevel = 0
+
+; Diagnostik aliran audio
+Global $bPhoneConnected = False
+Global $bWarnNoPhone = False
+Global $bWarnNoData = False
+Global $bWarnSilent = False
+Global $iStatBytes = 0
+Global $iStatPeak = 0
+Global $tLastGrow = 0
+Global $tLastPeak = 0
+Global $sCapDev = "?"
+Global $sLastLevelTxt = ""
+
+; Kontrol GUI
+Global $hGUI = 0
+Global $boxStatus = 0
+Global $lblStatusText = 0
+Global $btnConnect = 0
+Global $chkAuto = 0
+Global $lblLevel = 0
+Global $txtLog = 0
+Global $nMsg = 0
+
+; ==============================================================================
+; INISIALISASI ENGINE
+; ==============================================================================
+$ENGINE_DIR = LocateEngine()
+If $ENGINE_DIR = "" Then
+    MsgBox(16, "YunuAudio Fatal Error", "Folder 'Engine' atau 'adb.exe' tidak ditemukan!" & @CRLF & _
+            "Pastikan folder 'Engine' berada sejajar dengan file ini.")
+    Exit
+EndIf
+
+FileChangeDir($ENGINE_DIR)
+$ADB = $ENGINE_DIR & "\adb.exe"
+$CAPTURE = LocateFile("YunuCapture.exe")
+$APK = LocateFile("YunuAudio.apk")
+$SVV = LocateFile("SoundVolumeView.exe")
+$VBCABLE_SETUP = LocateFile("VBCABLE_Setup_x64.exe")
+
+OnAutoItExitRegister("FastExit")
+
+; ==============================================================================
+; TAMPILAN GUI
+; ==============================================================================
+$hGUI = GUICreate("YunuAudio", 360, 340, -1, -1)
+GUISetBkColor(0x141414)
+
+$boxStatus = GUICtrlCreateLabel("", 20, 15, 320, 55, $SS_CENTER)
+GUICtrlSetBkColor($boxStatus, 0xC62828)
+
+$lblStatusText = GUICtrlCreateLabel("BELUM TERSAMBUNG", 30, 30, 300, 25, $SS_CENTER)
+GUICtrlSetFont($lblStatusText, 11, 800, 0, "Segoe UI")
+GUICtrlSetColor($lblStatusText, 0xFFFFFF)
+GUICtrlSetBkColor($lblStatusText, $GUI_BKCOLOR_TRANSPARENT)
+
+$btnConnect = GUICtrlCreateButton("SAMBUNGKAN AUDIO", 20, 80, 320, 45)
+GUICtrlSetFont($btnConnect, 11, 700, 0, "Segoe UI")
+
+$chkAuto = GUICtrlCreateCheckbox(" Otomatis sambungkan saat kabel USB dicolok", 25, 132, 310, 18)
+GUICtrlSetColor($chkAuto, 0xCCCCCC)
+GUICtrlSetBkColor($chkAuto, 0x141414)
+GUICtrlSetState($chkAuto, $GUI_CHECKED)
+
+$lblLevel = GUICtrlCreateLabel("", 20, 154, 320, 16, $SS_CENTER)
+GUICtrlSetFont($lblLevel, 8.5, 400, 0, "Segoe UI")
+GUICtrlSetColor($lblLevel, 0xB0B0B0)
+GUICtrlSetBkColor($lblLevel, $GUI_BKCOLOR_TRANSPARENT)
+
+$txtLog = GUICtrlCreateEdit("", 20, 175, 320, 145, BitOR($ES_AUTOVSCROLL, $ES_READONLY, $WS_VSCROLL))
+GUICtrlSetBkColor($txtLog, 0x1F1F1F)
+GUICtrlSetColor($txtLog, 0xE0E0E0)
+GUICtrlSetFont($txtLog, 8.5, 400, 0, "Consolas")
+
+GUISetState(@SW_SHOW, $hGUI)
+
+SetStateDisconnected("BELUM TERSAMBUNG")
+LogInfo("Engine siap (port " & $PORT & ").")
+If $CAPTURE = "" Then LogInfo("[!] YunuCapture.exe tidak ditemukan di folder Engine.")
+
+; Siapkan output audio virtual & volume 100%
+SetupVirtualAudioSafe()
+
+$tIdle = TimerInit()
+$tWatch = TimerInit()
+$tDeep = TimerInit()
+$tLevel = TimerInit()
+PollIdle() ; cek HP sekali di awal
+
+; ==============================================================================
+; MAIN LOOP
+; ==============================================================================
+While 1
+    $nMsg = GUIGetMsg()
+    Switch $nMsg
+        Case $GUI_EVENT_CLOSE
+            FastExit()
+
+        Case $btnConnect
+            If $IsConnected Then
+                DisconnectAudio(True)
+            Else
+                ConnectAudio(True)
+            EndIf
+    EndSwitch
+
+    If $IsConnected Then
+        DrainEngineOutput()
+        If TimerDiff($tLevel) > 500 Then UpdateLevelLabel()
+        If TimerDiff($tWatch) > 1500 Then WatchConnected()
+    ElseIf TimerDiff($tIdle) > 2000 Then
+        PollIdle()
+    EndIf
+
+    Sleep(25) ; beban CPU ~0% saat idle
+WEnd
+
+; ==============================================================================
+; SISTEM AUDIO VIRTUAL (VB-CABLE + SOUNDVOLUMEVIEW)
+; ==============================================================================
+
+Func SetupVirtualAudioSafe()
+    Local $tWait = 0
+
+    If $SVV = "" Or Not FileExists($SVV) Then
+        LogInfo("[!] SoundVolumeView.exe tidak ada: output audio tidak diatur otomatis.")
+        Return
+    EndIf
+
+    ; Cadangkan profil audio asli hanya jika belum ada cadangan
+    If Not FileExists($BACKUP_PROFILE) Then
+        RunWait('"' & $SVV & '" /SaveProfile "' & $BACKUP_PROFILE & '"', $ENGINE_DIR, @SW_HIDE)
+    EndIf
+
+    ; Pasang driver virtual jika perangkat 'CABLE Input' belum ada
+    If Not HasCableEndpoint() Then
+        If $VBCABLE_SETUP <> "" And FileExists($VBCABLE_SETUP) Then
+            LogInfo("Memasang driver audio virtual (beberapa detik)...")
+            $bDriverJustInstalled = True
+            RunWait('"' & $VBCABLE_SETUP & '" -i -h', $ENGINE_DIR, @SW_HIDE)
+            $tWait = TimerInit()
+            While Not HasCableEndpoint() And TimerDiff($tWait) < 12000
+                Sleep(500)
+            WEnd
+        Else
+            LogInfo("[!] Driver audio virtual belum terpasang dan installer tidak ditemukan.")
+        EndIf
+    EndIf
+
+    If HasCableEndpoint() Then
+        If $RENAME_DEVICE = 1 Then RenameCableToYunuAudio()
+        ActivateAndUnmuteVirtualAudio(True)
+        If HasActiveCableEndpoint() Then
+            LogInfo("Output virtual '" & $CABLE_NAME & "' aktif dan siap.")
+        Else
+            LogInfo("Output virtual '" & $CABLE_NAME & "' terdeteksi (diaktifkan ulang saat menyambung).")
+        EndIf
+    Else
+        LogInfo("[!] Output virtual tidak ditemukan. Memakai output audio bawaan Windows.")
+    EndIf
+EndFunc   ;==>SetupVirtualAudioSafe
+
+; $bFull = True : aktifkan + unmute + volume 100 + default. False : cukup jadikan default.
+Func ActivateAndUnmuteVirtualAudio($bFull = False)
+    Local $aIds[2] = [$CABLE_NAME, "VB-Audio Virtual Cable\Device\" & $CABLE_NAME & "\Render"]
+    Local $i = 0
+
+    If $SVV = "" Or Not FileExists($SVV) Then Return
+    If Not HasCableEndpoint() Then Return
+
+    If $bFull Then
+        For $i = 0 To UBound($aIds) - 1
+            RunWait('"' & $SVV & '" /Enable "' & $aIds[$i] & '"', $ENGINE_DIR, @SW_HIDE)
+            RunWait('"' & $SVV & '" /Unmute "' & $aIds[$i] & '"', $ENGINE_DIR, @SW_HIDE)
+            RunWait('"' & $SVV & '" /SetVolume "' & $aIds[$i] & '" 100', $ENGINE_DIR, @SW_HIDE)
+        Next
+    EndIf
+
+    ; Hanya pindahkan default Windows ke CABLE Input jika statusnya benar-benar ACTIVE
+    If HasActiveCableEndpoint() Then
+        For $i = 0 To UBound($aIds) - 1
+            RunWait('"' & $SVV & '" /SetDefault "' & $aIds[$i] & '" all', $ENGINE_DIR, @SW_HIDE)
+        Next
+        $bAudioSwitched = True
+    EndIf
+EndFunc   ;==>ActivateAndUnmuteVirtualAudio
+
+; Cek perangkat render 'CABLE...' di registry (state 1 aktif / 2 disabled / 8 unplugged).
+; HKEY_LOCAL_MACHINE64 = wajib untuk exe 32-bit agar tidak dialihkan ke WOW6432Node.
+Func HasCableEndpoint()
+    Local $sBase = "HKEY_LOCAL_MACHINE64\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
+    Local $i = 1, $sSub = "", $sVal = "", $iState = 0
+
+    While 1
+        $sSub = RegEnumKey($sBase, $i)
+        If @error Then ExitLoop
+        $sVal = RegRead($sBase & "\" & $sSub & "\Properties", "{a45c254e-df1c-4efd-8020-67d146a850e0},2")
+        If StringInStr($sVal, "CABLE") Then
+            $iState = BitAND(Number(RegRead($sBase & "\" & $sSub, "DeviceState")), 0xF)
+            If $iState = 1 Or $iState = 2 Or $iState = 8 Then Return True
+        EndIf
+        $i += 1
+    WEnd
+    Return False
+EndFunc   ;==>HasCableEndpoint
+
+Func HasActiveCableEndpoint()
+    Local $sBase = "HKEY_LOCAL_MACHINE64\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
+    Local $i = 1, $sSub = "", $sVal = "", $iState = 0
+
+    While 1
+        $sSub = RegEnumKey($sBase, $i)
+        If @error Then ExitLoop
+        $sVal = RegRead($sBase & "\" & $sSub & "\Properties", "{a45c254e-df1c-4efd-8020-67d146a850e0},2")
+        If StringInStr($sVal, "CABLE") Then
+            $iState = BitAND(Number(RegRead($sBase & "\" & $sSub, "DeviceState")), 0xF)
+            If $iState = 1 Then Return True
+        EndIf
+        $i += 1
+    WEnd
+    Return False
+EndFunc   ;==>HasActiveCableEndpoint
+
+Func HasAnyActiveRenderEndpoint()
+    Local $sBase = "HKEY_LOCAL_MACHINE64\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
+    Local $i = 1, $sSub = "", $iState = 0
+
+    While 1
+        $sSub = RegEnumKey($sBase, $i)
+        If @error Then ExitLoop
+        $iState = BitAND(Number(RegRead($sBase & "\" & $sSub, "DeviceState")), 0xF)
+        If $iState = 1 Then Return True
+        $i += 1
+    WEnd
+    Return False
+EndFunc   ;==>HasAnyActiveRenderEndpoint
+
+; Kosmetik (opsional, RenameDevice=1 di YunuAudio.ini)
+Func RenameCableToYunuAudio()
+    Local $sBase = "HKEY_LOCAL_MACHINE64\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
+    Local $i = 1, $sSubKey = "", $sPropKey = "", $sVal = ""
+
+    While 1
+        $sSubKey = RegEnumKey($sBase, $i)
+        If @error Then ExitLoop
+        $sPropKey = $sBase & "\" & $sSubKey & "\Properties"
+        $sVal = RegRead($sPropKey, "{a45c254e-df1c-4efd-8020-67d146a850e0},2")
+        If StringInStr($sVal, "CABLE") Then
+            RegWrite($sPropKey, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6", "REG_SZ", "YunuAudio")
+            ExitLoop
+        EndIf
+        $i += 1
+    WEnd
+EndFunc   ;==>RenameCableToYunuAudio
+
+Func RestoreAudioDefaults()
+    If Not $bAudioSwitched Then Return
+    If $SVV = "" Or Not FileExists($SVV) Then Return
+
+    ; Pulihkan default audio asli tanpa men-disable CABLE Input agar sesi berikutnya tidak nyangkut DISABLED
+    If FileExists($BACKUP_PROFILE) Then
+        RunWait('"' & $SVV & '" /LoadProfile "' & $BACKUP_PROFILE & '"', $ENGINE_DIR, @SW_HIDE)
+        FileDelete($BACKUP_PROFILE)
+    Else
+        RunWait('"' & $SVV & '" /SetDefault "Speakers" all', $ENGINE_DIR, @SW_HIDE)
+    EndIf
+    $bAudioSwitched = False
+EndFunc   ;==>RestoreAudioDefaults
+
+; ------------------------------------------------------------------------------
+; Siapkan output audio Windows tanpa memblokir paksa saat --check tidak cocok.
+; Return: 0 = lanjut jalankan engine, -2 = exe tidak bisa dijalankan
+; ------------------------------------------------------------------------------
+Func EnsureAudioOutputReady()
+    Local $sOut = "", $iTry = 0, $iErr = 0, $bRecognized = False
+
+    SetBusy("MENYIAPKAN OUTPUT AUDIO...")
+    $sOut = RunCapture('"' & $CAPTURE & '" --check', 7000)
+    $iErr = @error
+    If $iErr = 1 Then Return -2
+    If $iErr = 2 Then
+        ; Engine kemungkinan tidak mengenal --check dan malah mencoba listen
+        KillStrayEngines()
+        LogInfo("[!] YunuCapture.exe tidak mengenal --check, lanjut menyambung langsung...")
+        Return 0
+    EndIf
+
+    $bRecognized = (StringRegExp($sOut, "\[(ACTIVE|DISABLED|NOTPRESENT|UNPLUGGED|OTHER)\]") = 1)
+    If StringInStr($sOut, "[ACTIVE]") Then Return 0
+
+    If Not $bRecognized And HasAnyActiveRenderEndpoint() Then
+        Return 0
+    EndIf
+
+    LogInfo("[!] Output audio aktif belum terdeteksi. Mencoba mengaktifkan...")
+    RemedyEnableOutput()
+
+    For $iTry = 1 To 3
+        Sleep(1000)
+        If $bRecognized Then
+            $sOut = RunCapture('"' & $CAPTURE & '" --check', 7000)
+            If StringInStr($sOut, "[ACTIVE]") Then
+                LogInfo("[V] Output audio sudah aktif.")
+                Return 0
+            EndIf
+        EndIf
+        If HasAnyActiveRenderEndpoint() Then
+            LogInfo("[V] Output audio aktif terdeteksi di Windows.")
+            Return 0
+        EndIf
+    Next
+
+    If $bRecognized Then
+        LogInfo("[!] Info perangkat dari --check:")
+        LogDeviceList($sOut)
+    EndIf
+    If $bDriverJustInstalled Then
+        LogInfo("[!] Driver virtual baru dipasang. Jika gagal menangkap suara, restart PC sekali.")
+    EndIf
+    LogInfo("Tetap mencoba menyambungkan engine audio...")
+    Return 0
+EndFunc   ;==>EnsureAudioOutputReady
+
+Func RemedyEnableOutput()
+    Local $aIds[2] = [$CABLE_NAME, "VB-Audio Virtual Cable\Device\" & $CABLE_NAME & "\Render"]
+    Local $i = 0
+
+    ; Pastikan layanan audio Windows hidup
+    RunCapture('sc start AudioEndpointBuilder', 6000)
+    RunCapture('sc start Audiosrv', 6000)
+
+    If $SVV <> "" And FileExists($SVV) Then
+        For $i = 0 To UBound($aIds) - 1
+            RunWait('"' & $SVV & '" /Enable "' & $aIds[$i] & '"', $ENGINE_DIR, @SW_HIDE)
+            RunWait('"' & $SVV & '" /Unmute "' & $aIds[$i] & '"', $ENGINE_DIR, @SW_HIDE)
+            RunWait('"' & $SVV & '" /SetVolume "' & $aIds[$i] & '" 100', $ENGINE_DIR, @SW_HIDE)
+            RunWait('"' & $SVV & '" /SetDefault "' & $aIds[$i] & '" all', $ENGINE_DIR, @SW_HIDE)
+        Next
+    EndIf
+EndFunc   ;==>RemedyEnableOutput
+
+; Tampilkan daftar perangkat dari output 'YunuCapture.exe --check'
+Func LogDeviceList($sOut)
+    Local $a = StringRegExp($sOut, "(?m)^\s*\[(ACTIVE|DISABLED|NOTPRESENT|UNPLUGGED|OTHER)\]\s*(.*?)\s*$", 3)
+    Local $i = 0
+    If @error Then
+        LogInfo("    (tidak ada daftar perangkat dari --check)")
+        Return
+    EndIf
+    For $i = 0 To UBound($a) - 2 Step 2
+        LogInfo("    [" & $a[$i] & "] " & $a[$i + 1])
+    Next
+EndFunc   ;==>LogDeviceList
+
+; ==============================================================================
+; LOGIKA SAMBUNGAN AUDIO
+; ==============================================================================
+
+Func ConnectAudio($bManual = False)
+    Local $sSerial = "", $iCheck = 0, $sRev = ""
+
+    If $IsConnected Then Return True
+    If $bManual Then $AutoSuppressed = False
+
+    SetBusy("MENYAMBUNGKAN...")
+    LogInfo("Memeriksa kabel USB...")
+
+    $sSerial = GetDeviceStatus()
+    $LastStatus = $sSerial
+
+    If $sSerial = "NO_DEVICE" Then
+        SetStateDisconnected("HP BELUM DICOLOK")
+        LogInfo("[X] HP tidak terdeteksi. Colokkan kabel USB!")
+        Return False
+    ElseIf $sSerial = "UNAUTHORIZED" Then
+        SetStateDisconnected("IZINKAN DI LAYAR HP")
+        LogInfo("[!] Centang 'Selalu izinkan' pada pop-up di layar HP.")
+        Return False
+    ElseIf $sSerial = "OFFLINE" Then
+        SetStateDisconnected("HP OFFLINE")
+        LogInfo("[!] HP offline. Cabut dan colok ulang kabel USB.")
+        Return False
+    EndIf
+
+    $DeviceSerial = $FoundSerial
+    LogInfo("HP terdeteksi: " & $DeviceSerial)
+
+    ; 0. Engine audio harus ada
+    If $CAPTURE = "" Or Not FileExists($CAPTURE) Then
+        Return ConnectFail("ENGINE AUDIO HILANG", "[X] YunuCapture.exe tidak ditemukan di folder Engine.")
+    EndIf
+
+    ; 1. Pastikan output virtual (jika aktif) jadi default Windows
+    ActivateAndUnmuteVirtualAudio(False)
+
+    ; 2. Siapkan output audio Windows tanpa memblokir paksa
+    $iCheck = EnsureAudioOutputReady()
+    If $iCheck = -2 Then
+        Return ConnectFail("ENGINE AUDIO GAGAL", "[X] YunuCapture.exe tidak bisa dijalankan (butuh Windows 64-bit).")
+    EndIf
+
+    ; 3. Pastikan APK terpasang di HP
+    If Not EnsureReceiverInstalled() Then Return ConnectFail("GAGAL PASANG APK", "")
+
+    ; 4. Bersihkan sisa sesi lama (cegah zombie socket di HP / engine yatim di PC)
+    SetBusy("MENYAMBUNGKAN...")
+    Adb('shell am stopservice -n ' & $SVC, 3000)
+    Adb('reverse --remove tcp:' & $PORT, 3000)
+    StopEngine()
+    KillStrayEngines()
+    Sleep(300)
+
+    ; 5. Jembatan port USB
+    Adb('reverse tcp:' & $PORT & ' tcp:' & $PORT, 5000)
+    $sRev = Adb('reverse --list', 4000)
+    If Not StringInStr($sRev, "tcp:" & $PORT) Then
+        Return ConnectFail("ADB REVERSE GAGAL", "[X] Gagal membuat jembatan port USB: " & CleanLine($sRev))
+    EndIf
+
+    ; 6. Nyalakan penangkap audio PC dulu (menunggu HP)
+    If Not StartCaptureEngine() Then Return ConnectFail("ENGINE AUDIO GAGAL", "")
+    Sleep(200)
+
+    ; 7. Nyalakan service di HP
+    If Not StartPhoneService() Then Return ConnectFail("SERVICE HP GAGAL", "")
+
+    ResetDiagnostics()
+    $iRestarts = 0
+    $tWatch = TimerInit()
+    $tDeep = TimerInit()
+    SetStateConnected()
+    LogInfo("[V] Tersambung. Putar suara/video di PC sekarang.")
+    LogInfo("    (Naikkan juga volume MEDIA di HP.)")
+    Return True
+EndFunc   ;==>ConnectAudio
+
+Func ConnectFail($sShort, $sLog)
+    StopEngine()
+    If $DeviceSerial <> "" Then
+        Adb('shell am stopservice -n ' & $SVC, 3000)
+        Adb('reverse --remove tcp:' & $PORT, 3000)
+    EndIf
+    SetStateDisconnected($sShort)
+    If $sLog <> "" Then LogInfo($sLog)
+    If $AutoSuppressed = False Then LogInfo("Auto-connect dijeda. Klik tombol untuk coba lagi.")
+    $AutoSuppressed = True
+    Return False
+EndFunc   ;==>ConnectFail
+
+Func DisconnectAudio($bUser = True)
+    StopEngine()
+    If $DeviceSerial <> "" Then
+        Adb('shell am stopservice -n ' & $SVC, 4000)
+        Adb('reverse --remove tcp:' & $PORT, 4000)
+    EndIf
+    ResetDiagnostics()
+    SetStateDisconnected("TERPUTUS")
+    $AutoSuppressed = $bUser
+    LogInfo("Sambungan diputus.")
+EndFunc   ;==>DisconnectAudio
+
+Func HandleUnplug()
+    StopEngine()
+    ResetDiagnostics()
+    SetStateDisconnected("KABEL DICABUT")
+    $AutoSuppressed = False
+    $LastStatus = "NO_DEVICE"
+    LogInfo("[!] Kabel USB dicabut. Menunggu dicolok lagi...")
+EndFunc   ;==>HandleUnplug
+
+; ------------------------------------------------------------------------------
+; Pemantauan saat idle (belum tersambung): deteksi HP + auto-connect
+; ------------------------------------------------------------------------------
+Func PollIdle()
+    Local $sStat = ""
+
+    $tIdle = TimerInit()
+    $sStat = GetDeviceStatus()
+
+    If $sStat <> $LastStatus Then
+        $LastStatus = $sStat
+        Switch $sStat
+            Case "NO_DEVICE"
+                SetStateDisconnected("HP BELUM DICOLOK")
+                LogInfo("Menunggu kabel USB dicolok...")
+            Case "UNAUTHORIZED"
+                SetStateDisconnected("IZINKAN DI LAYAR HP")
+                LogInfo("[!] Muncul pop-up di layar HP, centang 'Selalu izinkan' lalu OK.")
+            Case "OFFLINE"
+                SetStateDisconnected("HP OFFLINE")
+                LogInfo("[!] HP offline. Cabut dan colok ulang kabel USB.")
+            Case "READY"
+                SetStateDisconnected("HP SIAP")
+                LogInfo("HP terdeteksi: " & $FoundSerial)
+        EndSwitch
+    EndIf
+
+    If $sStat <> "READY" Then $AutoSuppressed = False
+
+    If $sStat = "READY" And GUICtrlRead($chkAuto) = $GUI_CHECKED And Not $AutoSuppressed Then
+        ConnectAudio(False)
+    EndIf
+EndFunc   ;==>PollIdle
+
+; ------------------------------------------------------------------------------
+; Pemantauan saat tersambung: penangkap audio, kabel USB, service di HP
+; ------------------------------------------------------------------------------
+Func WatchConnected()
+    Local $iExit = -1
+    Local $sWhy = "ENGINE AUDIO ERROR"
+    Local $sOut = ""
+
+    $tWatch = TimerInit()
+
+    ; --- 1. Engine penangkap audio ---
+    If ProcessExists($hEngine) Then
+        If TimerDiff($tEngineStart) > 30000 Then $iRestarts = 0
+    Else
+        DrainEngineOutput()
+        $iExit = ProcExitCode($hEngineProc)
+        CloseH($hEngineProc)
+        $hEngineProc = 0
+        $hEngine = 0
+
+        ; Kode 10 / 11 / 2 = masalah permanen, jangan restart
+        If $iExit = 10 Or $iExit = 11 Or $iExit = 2 Then
+            If $iExit = 10 Then $sWhy = "TIDAK ADA OUTPUT AUDIO"
+            If $iExit = 11 Then $sWhy = "WASAPI ERROR"
+            If $iExit = 2 Then $sWhy = "PORT TERPAKAI"
+            LogInfo("[X] Penangkap audio berhenti (kode " & $iExit & ") dan tidak bisa dipulihkan otomatis.")
+            DisconnectAudio(True)
+            SetStateDisconnected($sWhy)
+            Return
+        EndIf
+
+        $iRestarts += 1
+        If $iRestarts > 5 Then
+            LogInfo("[X] Penangkap audio berhenti berulang kali.")
+            DisconnectAudio(True)
+            SetStateDisconnected("ENGINE AUDIO ERROR")
+            Return
+        EndIf
+        LogInfo("Aliran audio terputus (kode " & $iExit & "), memulai ulang (" & $iRestarts & "/5)...")
+        If Not StartCaptureEngine() Then
+            DisconnectAudio(True)
+            SetStateDisconnected("ENGINE AUDIO ERROR")
+            Return
+        EndIf
+    EndIf
+
+    ; --- 2. HP tidak kunjung terhubung ke PC ---
+    If Not $bPhoneConnected And Not $bWarnNoPhone And TimerDiff($tEngineStart) > 8000 Then
+        $bWarnNoPhone = True
+        LogInfo("[!] HP belum terhubung ke PC setelah 8 detik.")
+        If ServiceAlive() Then
+            LogInfo("    Service HP berjalan. Jembatan USB: " & CleanLine(Adb('reverse --list', 3000)))
+        Else
+            LogInfo("    Service di HP tidak berjalan. Menyalakan ulang...")
+            StartPhoneService()
+        EndIf
+    EndIf
+
+    ; --- 3. Pemeriksaan lebih berat tiap 3 detik: kabel & service HP ---
+    If TimerDiff($tDeep) > 3000 Then
+        $tDeep = TimerInit()
+        $sOut = RunCapture('"' & $ADB & '" devices', 5000)
+        If Not StringRegExp($sOut, "(?m)^\Q" & $DeviceSerial & "\E\s+device\s*$") Then
+            HandleUnplug()
+            Return
+        EndIf
+        If Not ServiceAlive() Then
+            LogInfo("Service di HP berhenti, menyalakan ulang...")
+            StartPhoneService()
+        EndIf
+    EndIf
+EndFunc   ;==>WatchConnected
+
+; ==============================================================================
+; DIAGNOSTIK ALIRAN AUDIO (membaca pesan & statistik dari YunuCapture.exe)
+; ==============================================================================
+
+Func ResetDiagnostics()
+    $bPhoneConnected = False
+    $bWarnNoPhone = False
+    $bWarnNoData = False
+    $bWarnSilent = False
+    $iStatBytes = 0
+    $iStatPeak = 0
+    $tLastGrow = TimerInit()
+    $tLastPeak = TimerInit()
+    $sCapDev = "?"
+    $sLastLevelTxt = ""
+EndFunc   ;==>ResetDiagnostics
+
+Func DrainEngineOutput()
+    Local $s = "", $aLines = 0, $n = 0, $i = 0
+
+    If $hEngine = 0 Then Return
+    $s = StdoutRead($hEngine)
+    If $s = "" Then Return
+
+    $sEngBuf &= $s
+    $aLines = StringSplit(StringReplace($sEngBuf, @CR, ""), @LF, 2)
+    $n = UBound($aLines)
+    $sEngBuf = $aLines[$n - 1]
+
+    For $i = 0 To $n - 2
+        HandleEngineLine($aLines[$i])
+    Next
+EndFunc   ;==>DrainEngineOutput
+
+Func HandleEngineLine($sLine)
+    Local $aM = 0, $aD = 0, $iB = 0
+
+    $sLine = StringStripWS($sLine, 3)
+    If $sLine = "" Then Return
+
+    $aM = StringRegExp($sLine, "^STAT\s+(\d+)\s+(\d+)", 1)
+    If Not @error Then
+        $iB = Number($aM[0])
+        If $iB > $iStatBytes Then
+            $tLastGrow = TimerInit()
+            $bWarnNoData = False
+        EndIf
+        $iStatBytes = $iB
+        $iStatPeak = Int($aM[1])
+        If $iStatPeak > 0 Then
+            $tLastPeak = TimerInit()
+            $bWarnSilent = False
+        EndIf
+        Return
+    EndIf
+
+    If StringInStr($sLine, "HP terhubung.") Then
+        $bPhoneConnected = True
+        $tLastGrow = TimerInit()
+        $tLastPeak = TimerInit()
+        LogInfo("[V] HP sudah terhubung ke PC (jalur USB OK).")
+        Return
+    EndIf
+
+    If StringInStr($sLine, "Merekam dari:") Then
+        $aD = StringRegExp($sLine, "Merekam dari:\s*(.*?)\s*\|", 1)
+        If Not @error Then $sCapDev = $aD[0]
+        LogInfo(StringReplace($sLine, "[capture] ", ""))
+        Return
+    EndIf
+
+    If $iEngineLog < 8 Then
+        $iEngineLog += 1
+        LogInfo(CleanLine($sLine))
+    EndIf
+EndFunc   ;==>HandleEngineLine
+
+Func UpdateLevelLabel()
+    Local $sTxt = ""
+
+    $tLevel = TimerInit()
+
+    If Not $bPhoneConnected Then
+        $sTxt = "Menunggu HP terhubung ke PC..."
+    ElseIf TimerDiff($tLastGrow) > 3000 Then
+        $sTxt = "HP terhubung, tapi PC belum mengirim suara"
+        If Not $bWarnNoData And TimerDiff($tLastGrow) > 8000 Then
+            $bWarnNoData = True
+            LogInfo("[!] Tidak ada data audio dari output '" & $sCapDev & "'.")
+            LogInfo("    Putar suara di PC. Kalau sudah diputar, aplikasi itu tidak memakai")
+            LogInfo("    output default Windows (cek Settings > Sound > Volume mixer).")
+        EndIf
+    ElseIf TimerDiff($tLastPeak) > 5000 Then
+        $sTxt = "Data masuk tapi HENING (cek volume/mute)"
+        If Not $bWarnSilent And TimerDiff($tLastPeak) > 8000 Then
+            $bWarnSilent = True
+            LogInfo("[!] Data audio mengalir tapi isinya hening (output '" & $sCapDev & "').")
+            LogInfo("    Cek volume aplikasi pemutar & mute di Volume mixer Windows.")
+        EndIf
+    Else
+        $sTxt = "Suara mengalir | level " & $iStatPeak & "%"
+    EndIf
+
+    If $sTxt <> $sLastLevelTxt Then
+        $sLastLevelTxt = $sTxt
+        GUICtrlSetData($lblLevel, $sTxt)
+    EndIf
+EndFunc   ;==>UpdateLevelLabel
+
+; ==============================================================================
+; ANDROID / ADB
+; ==============================================================================
+
+Func Adb($sArgs, $iTimeout = 8000)
+    Local $sCmd = '"' & $ADB & '"'
+    If $DeviceSerial <> "" Then $sCmd &= ' -s "' & $DeviceSerial & '"'
+    Return RunCapture($sCmd & ' ' & $sArgs, $iTimeout)
+EndFunc   ;==>Adb
+
+; Mengembalikan READY / UNAUTHORIZED / OFFLINE / NO_DEVICE. Serial HP siap -> $FoundSerial
+Func GetDeviceStatus()
+    Local $sOut = "", $aM = 0
+
+    $FoundSerial = ""
+    $sOut = RunCapture('"' & $ADB & '" devices', 8000)
+
+    $aM = StringRegExp($sOut, "(?m)^(\S+)\s+device\s*$", 1)
+    If Not @error Then
+        $FoundSerial = $aM[0]
+        Return "READY"
+    EndIf
+    If StringRegExp($sOut, "(?m)^\S+\s+unauthorized\s*$") Then Return "UNAUTHORIZED"
+    If StringRegExp($sOut, "(?m)^\S+\s+offline\s*$") Then Return "OFFLINE"
+    Return "NO_DEVICE"
+EndFunc   ;==>GetDeviceStatus
+
+Func EnsureReceiverInstalled()
+    Local $sOut = Adb('shell pm list packages ' & $PKG, 5000)
+
+    If Not StringInStr($sOut, "package:" & $PKG) Then
+        If $APK = "" Or Not FileExists($APK) Then
+            LogInfo("[X] YunuAudio.apk tidak ditemukan di folder Engine.")
+            Return False
+        EndIf
+        SetBusy("MEMASANG APK...")
+        LogInfo("Memasang YunuAudio di HP (hanya sekali)...")
+        $sOut = Adb('install -r -g "' & $APK & '"', 60000)
+        If Not StringInStr($sOut, "Success") Then
+            ; Android 5.x tidak mengenal opsi -g: coba tanpa -g
+            $sOut = Adb('install -r "' & $APK & '"', 60000)
+        EndIf
+        If Not StringInStr($sOut, "Success") Then
+            LogInfo("[X] Gagal memasang APK: " & CleanLine($sOut))
+            LogInfo("    (Xiaomi/Oppo/Vivo: aktifkan 'Install via USB' di Opsi Pengembang)")
+            Return False
+        EndIf
+        LogInfo("[V] APK receiver terpasang.")
+    EndIf
+    ; Android 13+: izin notifikasi service (error di Android lama diabaikan)
+    Adb('shell pm grant ' & $PKG & ' android.permission.POST_NOTIFICATIONS', 4000)
+    Return True
+EndFunc   ;==>EnsureReceiverInstalled
+
+Func StartPhoneService()
+    Local $sExtra = ""
+    Local $sOut = ""
+
+    If $PORT <> 8080 Then $sExtra = " --ei port " & $PORT
+
+    $sOut = Adb('shell am start-foreground-service -n ' & $SVC & $sExtra, 5000)
+    If StringRegExp($sOut, "(?i)error|exception|unknown command|usage") Then
+        $sOut = Adb('shell am startservice -n ' & $SVC & $sExtra, 5000)
+    EndIf
+    If StringRegExp($sOut, "(?i)error|exception|unknown command|usage") Then
+        LogInfo("[X] Service HP gagal dijalankan: " & CleanLine($sOut))
+        Return False
+    EndIf
+    Return True
+EndFunc   ;==>StartPhoneService
+
+Func ServiceAlive()
+    Local $s = Adb('shell pidof ' & $PKG, 5000)
+
+    If StringRegExp($s, "\d+") Then Return True
+    If StringRegExp($s, "(?i)not found|inaccessible|unknown|error|usage") Then Return True
+    Return False
+EndFunc   ;==>ServiceAlive
+
+; ==============================================================================
+; ENGINE AUDIO PC (YunuCapture.exe - WASAPI loopback)
+; ==============================================================================
+
+Func StartCaptureEngine()
+    Local $iExit = -1
+    Local $sLeft = ""
+
+    If $CAPTURE = "" Or Not FileExists($CAPTURE) Then
+        LogInfo("[X] YunuCapture.exe tidak ditemukan.")
+        Return False
+    EndIf
+
+    StopEngine()
+    $sEngBuf = ""
+    $hEngine = Run('"' & $CAPTURE & '" ' & $PORT, $ENGINE_DIR, @SW_HIDE, BitOR($STDOUT_CHILD, $STDERR_MERGED))
+    If $hEngine = 0 Then
+        LogInfo("[X] YunuCapture.exe tidak bisa dijalankan.")
+        Return False
+    EndIf
+    $hEngineProc = OpenProc($hEngine)
+
+    $tEngineStart = TimerInit()
+    $iEngineLog = 0
+    $bPhoneConnected = False
+    $bWarnNoPhone = False
+
+    Sleep(400)
+    If Not ProcessExists($hEngine) Then
+        DrainEngineOutput()
+        $sLeft = CleanLine($sEngBuf)
+        $iExit = ProcExitCode($hEngineProc)
+        LogInfo("[X] Penangkap audio langsung berhenti (kode " & $iExit & ").")
+        If $sLeft <> "" Then LogInfo("    Detail: " & $sLeft)
+        If $iExit = 2 Then LogInfo("    Port " & $PORT & " dipakai program lain. Ubah Port di YunuAudio.ini.")
+        If $iExit = 10 Then
+            LogInfo("    Tidak ada output audio aktif di Windows.")
+            If $bDriverJustInstalled Then LogInfo("    Driver baru dipasang: coba RESTART PC sekali.")
+        EndIf
+        CloseH($hEngineProc)
+        $hEngineProc = 0
+        $hEngine = 0
+        Return False
+    EndIf
+    Return True
+EndFunc   ;==>StartCaptureEngine
+
+Func StopEngine()
+    If $hEngine <> 0 Then
+        ProcessClose($hEngine)
+        $hEngine = 0
+    EndIf
+    If $hEngineProc <> 0 Then
+        CloseH($hEngineProc)
+        $hEngineProc = 0
+    EndIf
+EndFunc   ;==>StopEngine
+
+; Matikan sisa YunuCapture.exe yatim dari sesi sebelumnya
+Func KillStrayEngines()
+    Local $i = 0
+    While ProcessExists("YunuCapture.exe") And $i < 10
+        ProcessClose("YunuCapture.exe")
+        Sleep(100)
+        $i += 1
+    WEnd
+EndFunc   ;==>KillStrayEngines
+
+Func OpenProc($iPID)
+    Local $a = DllCall("kernel32.dll", "handle", "OpenProcess", "dword", 0x1000, "bool", False, "dword", $iPID)
+    If @error Or Not IsArray($a) Then Return 0
+    Return $a[0]
+EndFunc   ;==>OpenProc
+
+Func ProcExitCode($h)
+    Local $a = 0
+
+    If Not $h Then Return -1
+    $a = DllCall("kernel32.dll", "bool", "GetExitCodeProcess", "handle", $h, "dword*", 0)
+    If @error Or Not IsArray($a) Or Not $a[0] Then Return -1
+    Return $a[2]
+EndFunc   ;==>ProcExitCode
+
+Func CloseH($h)
+    If $h Then DllCall("kernel32.dll", "bool", "CloseHandle", "handle", $h)
+EndFunc   ;==>CloseH
+
+; ==============================================================================
+; TAMPILAN GUI STATE
+; ==============================================================================
+
+Func SetBusy($sMsg)
+    GUICtrlSetBkColor($boxStatus, 0xEF6C00)
+    GUICtrlSetData($lblStatusText, $sMsg)
+    GUICtrlSetData($btnConnect, "MOHON TUNGGU...")
+    GUICtrlSetState($btnConnect, $GUI_DISABLE)
+EndFunc   ;==>SetBusy
+
+Func SetStateConnected()
+    $IsConnected = True
+    GUICtrlSetBkColor($boxStatus, 0x2E7D32)
+    GUICtrlSetData($lblStatusText, "SUARA TERSAMBUNG KE HP")
+    GUICtrlSetData($btnConnect, "PUTUSKAN SAMBUNGAN")
+    GUICtrlSetState($btnConnect, $GUI_ENABLE)
+EndFunc   ;==>SetStateConnected
+
+Func SetStateDisconnected($sMsg = "BELUM TERSAMBUNG")
+    $IsConnected = False
+    GUICtrlSetBkColor($boxStatus, 0xC62828)
+    GUICtrlSetData($lblStatusText, $sMsg)
+    GUICtrlSetData($btnConnect, "SAMBUNGKAN AUDIO")
+    GUICtrlSetState($btnConnect, $GUI_ENABLE)
+    GUICtrlSetData($lblLevel, "")
+    $sLastLevelTxt = ""
+EndFunc   ;==>SetStateDisconnected
+
+Func LogInfo($sTxt)
+    Local $sCur = GUICtrlRead($txtLog)
+    Local $iPos = 0
+
+    If StringLen($sCur) > 5000 Then
+        $sCur = StringRight($sCur, 3000)
+        $iPos = StringInStr($sCur, @LF)
+        If $iPos > 0 Then $sCur = StringMid($sCur, $iPos + 1)
+    EndIf
+    GUICtrlSetData($txtLog, $sCur & "[" & @HOUR & ":" & @MIN & ":" & @SEC & "] " & $sTxt & @CRLF)
+    GUICtrlSendMsg($txtLog, 0x00B1, -1, -1) ; EM_SETSEL -> ke akhir teks
+    GUICtrlSendMsg($txtLog, 0x00B7, 0, 0)   ; EM_SCROLLCARET
+EndFunc   ;==>LogInfo
+
+Func CleanLine($s)
+    $s = StringRegExpReplace(StringStripWS($s, 3), "\s*[\r\n]+\s*", " | ")
+    If StringLen($s) > 120 Then $s = StringLeft($s, 120) & "..."
+    Return $s
+EndFunc   ;==>CleanLine
+
+; ==============================================================================
+; KELUAR
+; ==============================================================================
+
+Func FastExit()
+    If $bExiting Then Return
+    $bExiting = True
+
+    If $hGUI Then GUISetState(@SW_HIDE, $hGUI)
+    StopEngine()
+
+    If $IsConnected And $DeviceSerial <> "" Then
+        Run('"' & $ADB & '" -s "' & $DeviceSerial & '" shell am stopservice -n ' & $SVC, $ENGINE_DIR, @SW_HIDE)
+        Run('"' & $ADB & '" -s "' & $DeviceSerial & '" reverse --remove tcp:' & $PORT, $ENGINE_DIR, @SW_HIDE)
+    EndIf
+
+    RestoreAudioDefaults()
+    Exit
+EndFunc   ;==>FastExit
+
+; ==============================================================================
+; UTILITAS
+; ==============================================================================
+
+Func RunCapture($sCmd, $iTimeout = 8000)
+    Local $iPID = Run($sCmd, $ENGINE_DIR, @SW_HIDE, BitOR($STDOUT_CHILD, $STDERR_MERGED))
+    Local $sOut = ""
+    Local $sChunk = ""
+    Local $hTimer = 0
+    Local $bTimeout = False
+    Local $iDrain = 0
+
+    If $iPID = 0 Then Return SetError(1, 0, "")
+
+    $hTimer = TimerInit()
+    While ProcessExists($iPID)
+        $sChunk = StdoutRead($iPID)
+        If $sChunk <> "" Then $sOut &= $sChunk
+        If TimerDiff($hTimer) > $iTimeout Then
+            $bTimeout = True
+            ProcessClose($iPID)
+            ExitLoop
+        EndIf
+        Sleep(15)
+    WEnd
+
+    ; Kuras sisa buffer stdout setelah proses selesai
+    For $iDrain = 1 To 5
+        $sChunk = StdoutRead($iPID)
+        If @error Or $sChunk = "" Then ExitLoop
+        $sOut &= $sChunk
+    Next
+
+    If $bTimeout Then Return SetError(2, 0, $sOut)
+    Return $sOut
+EndFunc   ;==>RunCapture
+
+Func LocateEngine()
+    Local $targets[3] = [@ScriptDir & "\Engine", @ScriptDir, @ScriptDir & "\.."]
+    Local $i = 0
+    For $i = 0 To UBound($targets) - 1
+        If FileExists($targets[$i] & "\adb.exe") Then Return $targets[$i]
+    Next
+    Return ""
+EndFunc   ;==>LocateEngine
+
+Func LocateFile($sName)
+    Local $targets[4] = [$ENGINE_DIR, $ENGINE_DIR & "\Driver", @ScriptDir, @ScriptDir & "\Engine"]
+    Local $i = 0
+    For $i = 0 To UBound($targets) - 1
+        If FileExists($targets[$i] & "\" & $sName) Then Return $targets[$i] & "\" & $sName
+    Next
+    Return ""
+EndFunc   ;==>LocateFile
