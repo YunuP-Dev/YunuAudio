@@ -41,7 +41,7 @@ Perfect for:
 
 ## 🔥 What's New in Latest Release 🎉
 
-### 🔊 YunuAudio *(FIRST OFFICIAL RELEASE V1.0.0 Beta 🎉)*
+### 🔊 YunuAudio *(FIRST OFFICIAL RELEASE V1.0.0  🎉)*
 
 This is the **first official release** of YunuAudio. Here's everything packed into it:
 
