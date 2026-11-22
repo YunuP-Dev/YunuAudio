@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔊 YunuAudio V1.0.0 Beta
+# 🔊 YunuAudio V1.0.0
 
 
 
