@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔊 YunuAudio V0.1.1 Beta
+# 🔊 YunuAudio V1.0.0 Beta
 
 
 
@@ -11,6 +11,7 @@
 ---
 
 ## 🖼️ Screenshots
+<img width="542" height="492" alt="image" src="https://github.com/user-attachments/assets/6aa34f7d-c952-4954-8a13-d21cf0e881d6" />
 
 
 
